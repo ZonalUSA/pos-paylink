@@ -1,211 +1,159 @@
-<!doctype html>
-<!--
-  Pay by Link tip page.
+// Pay by Link tip API (JSON).
+//
+// The customer-facing tip *page* is a static HTML file hosted in Supabase
+// Storage (the Edge Functions gateway rewrites text/html → text/plain on the
+// default domain, so HTML can't be served from here). That page calls this
+// function for data and to create the payment link.
+//
+// Endpoints (same origin as the Storage page, so no CORS issues):
+//   GET ?order=<id>
+//       → { ok, orderNumber, amount, tips:[{pct,amount}] }  or { ok:false, reason }
+//   GET ?order=<id>&action=create&tip=<minorUnits>
+//       → { ok, url }  or { ok:false, reason }
+//
+// Amount is read from orders.pay_link_amount (authoritative — never supplied by
+// the client). Adyen credentials + tip presets come from location_settings.
+//
+// Deploy: Edge Function `pay-tip`, paste this index.ts, DISABLE "Verify JWT".
 
-  Supabase serves HTML as text/plain (anti-abuse), so host this page somewhere
-  that serves real HTML — GitHub Pages is the easy free option:
-    1. Put this file in a PUBLIC repo (it has no secrets).
-    2. Enable GitHub Pages for that repo.
-    3. Set the resulting URL as "Pay by Link page URL" in the POS settings.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-  The printed QR points here with the order id and Supabase API base in the URL
-  hash (#order=<id>&api=https://xxx.supabase.co), kept client-side. The page
-  calls the pay-tip Edge Function (JSON, CORS-enabled) for the amount + tip
-  options and to create the payment link.
--->
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Pay Your Check</title>
-<style>
-  :root { color-scheme: light; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-         background:#f5f6f8; color:#1a1a1a; }
-  .wrap { max-width:460px; margin:0 auto; padding:24px 18px 48px; }
-  h1 { font-size:20px; margin:8px 0 2px; }
-  .muted { color:#666; font-size:14px; }
-  .card { background:#fff; border-radius:14px; padding:20px; margin-top:16px;
-          box-shadow:0 1px 4px rgba(0,0,0,.06); }
-  .brand { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
-  .brand img { max-height:40px; max-width:160px; border-radius:6px; }
-  .brand .name { font-size:18px; font-weight:700; }
-  .bill { font-size:34px; font-weight:700; }
-  .link { color:#1A73E8; font-size:14px; font-weight:600; cursor:pointer;
-          background:none; border:0; padding:0; margin-top:10px; }
-  .lines { margin-top:10px; display:none; border-top:1px solid #eee; padding-top:8px; }
-  .lines.show { display:block; }
-  .line { display:flex; justify-content:space-between; font-size:14px; padding:3px 0; }
-  .line .q { color:#666; }
-  .line-total { display:flex; justify-content:space-between; font-weight:700;
-                border-top:1px solid #eee; margin-top:6px; padding-top:6px; font-size:15px; }
-  .tips { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:16px; }
-  .tip { border:1.5px solid #d9dce1; background:#fff; border-radius:12px; padding:14px;
-         font-size:16px; font-weight:600; cursor:pointer; text-align:center; }
-  .tip small { display:block; font-weight:400; color:#666; margin-top:2px; }
-  .tip.sel { border-color:#1A73E8; background:#eaf1fe; }
-  .custom { margin-top:12px; display:none; }
-  .custom.show { display:block; }
-  .custom input { width:100%; font-size:18px; padding:12px; border:1.5px solid #d9dce1;
-                  border-radius:12px; }
-  .total { display:flex; justify-content:space-between; margin-top:18px; font-size:18px;
-           font-weight:700; }
-  button.pay { width:100%; margin-top:18px; padding:16px; font-size:17px; font-weight:700;
-               color:#fff; background:#1A73E8; border:0; border-radius:12px; cursor:pointer; }
-  button.pay:disabled { opacity:.5; }
-</style>
-</head>
-<body>
-<div class="wrap" id="root"><div class="card"><p class="muted">Loading your check…</p></div></div>
-<script>
-(function () {
-  var root = document.getElementById('root');
-  function money(n) { return '$' + Number(n).toFixed(2); }
-  function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-  function msg(text) {
-    root.innerHTML = '<h1>Pay your bill</h1><div class="card"><p class="muted">' +
-      text + '</p></div>';
-  }
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-  // Order id + Supabase API base come from the URL hash (kept client-side).
-  var params = new URLSearchParams((location.hash || '').replace(/^#/, ''));
-  var orderId = params.get('order');
-  var apiBase = params.get('api');
-  if (!orderId || !apiBase) { msg('This payment link is incomplete.'); return; }
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "*",
+  "access-control-allow-methods": "GET, OPTIONS",
+};
 
-  var api = apiBase.replace(/\/+$/, '') + '/functions/v1/pay-tip?order=' +
-    encodeURIComponent(orderId);
+function json(obj: unknown, status = 200): Response {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "no-store", ...CORS },
+  });
+}
 
-  fetch(api).then(function (r) { return r.json(); }).then(function (d) {
-    if (!d.ok) {
-      var reasons = {
-        paid: 'This check has already been paid. Thank you!',
-        notfound: 'This check could not be found yet — give it a moment and rescan.',
-        nothing: 'There is nothing left to pay on this check.'
-      };
-      msg(reasons[d.reason] || 'Sorry, this check is not available.');
-      return;
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+
+  const url = new URL(req.url);
+  const orderId = url.searchParams.get("order");
+  if (!orderId) return json({ ok: false, reason: "missing" }, 400);
+
+  const { data: order, error } = await supabase
+    .from("orders")
+    .select("order_number, pay_link_amount, paid_at, pay_link_items, pay_link_summary")
+    .eq("id", orderId)
+    .maybeSingle();
+
+  if (error) return json({ ok: false, reason: "error" }, 500);
+  if (!order) return json({ ok: false, reason: "notfound" });
+  if (order.paid_at) return json({ ok: false, reason: "paid" });
+
+  const bill = Number(order.pay_link_amount ?? 0);
+  if (!(bill > 0)) return json({ ok: false, reason: "nothing" });
+
+  // select("*") so a not-yet-added column never fails the whole read (missing
+  // columns simply come back undefined and fall back to defaults below).
+  const { data: s, error: sErr } = await supabase
+    .from("location_settings")
+    .select("*")
+    .eq("id", "default")
+    .maybeSingle();
+  if (sErr) console.error("location_settings read failed", sErr);
+
+  // ── Create link ───────────────────────────────────────────────────────────
+  if (url.searchParams.get("action") === "create") {
+    const apiKey = (s?.adyen_api_key ?? "") as string;
+    const merchant = (s?.adyen_merchant_account ?? "") as string;
+    if (!apiKey || !merchant) {
+      console.error("Missing Adyen creds in location_settings", {
+        hasKey: !!apiKey,
+        hasMerchant: !!merchant,
+        rowFound: !!s,
+      });
+      return json({ ok: false, reason: "config" }, 500);
     }
-    render(d);
-  }).catch(function () { msg('Could not load your check. Please try again.'); });
-
-  function render(d) {
-    var bill = d.amount;
-    var tipCents = 0;
-    var tiles = (d.tips || []).map(function (t) {
-      return '<div class="tip" data-tip="' + Math.round(t.amount * 100) + '">' +
-        t.pct + '%<small>' + money(t.amount) + '</small></div>';
-    }).join('');
-
-    // Branded header: logo and/or restaurant name, falling back to a title.
-    var brandHtml = '';
-    if (d.brand || d.logo) {
-      brandHtml = '<div class="brand">' +
-        (d.logo ? '<img src="' + esc(d.logo) + '" alt="">' : '') +
-        (d.brand ? '<span class="name">' + esc(d.brand) + '</span>' : '') +
-        '</div>';
-    }
-
-    // Collapsible check details: line items + a subtotal/tax breakdown.
-    var linesHtml = '';
-    if ((d.lines && d.lines.length) || d.summary) {
-      var rows = (d.lines || []).map(function (l) {
-        return '<div class="line"><span><span class="q">' + l.qty + '× </span>' +
-          esc(l.name) + '</span><span>' + money(l.amount) + '</span></div>';
-      }).join('');
-
-      var sm = d.summary || {};
-      var breakdown = '';
-      function sub(label, val, neg) {
-        breakdown += '<div class="line"><span class="q">' + label + '</span><span>' +
-          (neg ? '-' : '') + money(val) + '</span></div>';
+    const tip = Math.max(0, parseInt(url.searchParams.get("tip") ?? "0", 10)) / 100;
+    const total = bill + tip;
+    // Optional shopper email → Adyen sends its payment confirmation email if
+    // the confirmation-email setting is enabled in the Customer Area.
+    const emailRaw = (url.searchParams.get("email") ?? "").trim();
+    const shopperEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailRaw)
+      ? emailRaw
+      : "";
+    const testEnv = (s?.adyen_test_environment ?? true) as boolean;
+    const prefix = (s?.adyen_live_url_prefix ?? "") as string;
+    const host = testEnv
+      ? "checkout-test.adyen.com"
+      : `${prefix}-checkout-live.adyenpayments.com`;
+    const path = testEnv ? "/v71/paymentLinks" : "/checkout/v71/paymentLinks";
+    try {
+      const resp = await fetch(`https://${host}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          merchantAccount: merchant,
+          amount: { currency: "USD", value: Math.round(total * 100) },
+          reference: `brain-pos-${order.order_number}`,
+          countryCode: "US",
+          ...(shopperEmail ? { shopperEmail } : {}),
+          metadata: {
+            orderId,
+            orderNumber: String(order.order_number),
+            tip: String(Math.round(tip * 100)),
+          },
+        }),
+      });
+      if (!resp.ok) {
+        console.error("paymentLinks failed", resp.status, await resp.text());
+        return json({ ok: false, reason: "adyen" }, 502);
       }
-      if (sm.subtotal) sub('Subtotal', sm.subtotal, false);
-      if (sm.discount) sub('Discount', sm.discount, true);
-      if (sm.serviceCharge) sub('Service charge', sm.serviceCharge, false);
-      if (sm.tax) sub('Sales tax', sm.tax, false);
-
-      linesHtml =
-        '<button class="link" id="toggleLines">View check details ▾</button>' +
-        '<div class="lines" id="linesBox">' + rows +
-          (breakdown ? '<div style="border-top:1px solid #eee;margin-top:6px;padding-top:6px">' +
-            breakdown + '</div>' : '') +
-          '<div class="line-total"><span>Total due</span><span>' + money(bill) +
-          '</span></div>' +
-        '</div>';
+      const link = await resp.json();
+      return json({ ok: true, url: link.url });
+    } catch (e) {
+      console.error("paymentLinks exception", e);
+      return json({ ok: false, reason: "adyen" }, 502);
     }
-
-    root.innerHTML =
-      brandHtml +
-      '<h1>Pay your bill</h1>' +
-      '<p class="muted">Order #' + d.orderNumber + '</p>' +
-      '<div class="card">' +
-        '<div class="muted">Amount due</div>' +
-        '<div class="bill">' + money(bill) + '</div>' +
-        linesHtml +
-        '<div class="muted" style="margin-top:18px;font-weight:600;color:#1a1a1a">Add a tip?</div>' +
-        '<div class="tips">' + tiles +
-          '<div class="tip" data-tip="custom">Custom</div>' +
-          '<div class="tip sel" data-tip="0">No tip</div>' +
-        '</div>' +
-        '<div class="custom" id="customWrap">' +
-          '<input id="customAmt" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Tip amount ($)">' +
-        '</div>' +
-        '<div class="total"><span>Total</span><span id="total">' + money(bill) + '</span></div>' +
-        '<button class="pay" id="pay">Continue to payment</button>' +
-      '</div>';
-
-    var toggle = document.getElementById('toggleLines');
-    if (toggle) {
-      toggle.addEventListener('click', function () {
-        var box = document.getElementById('linesBox');
-        var open = box.classList.toggle('show');
-        toggle.textContent = open ? 'Hide check details ▴' : 'View check details ▾';
-      });
-    }
-
-    var tiles2 = root.querySelectorAll('.tip');
-    var customWrap = document.getElementById('customWrap');
-    var customAmt = document.getElementById('customAmt');
-    var totalEl = document.getElementById('total');
-    function renderTotal() { totalEl.textContent = money((bill * 100 + tipCents) / 100); }
-    function select(t) { tiles2.forEach(function (x) { x.classList.remove('sel'); }); t.classList.add('sel'); }
-
-    tiles2.forEach(function (tile) {
-      tile.addEventListener('click', function () {
-        select(tile);
-        var v = tile.getAttribute('data-tip');
-        if (v === 'custom') {
-          customWrap.classList.add('show');
-          var c = parseFloat(customAmt.value || '0');
-          tipCents = isNaN(c) ? 0 : Math.max(0, Math.round(c * 100));
-        } else {
-          customWrap.classList.remove('show');
-          tipCents = parseInt(v, 10) || 0;
-        }
-        renderTotal();
-      });
-    });
-    customAmt.addEventListener('input', function () {
-      var c = parseFloat(customAmt.value || '0');
-      tipCents = isNaN(c) ? 0 : Math.max(0, Math.round(c * 100));
-      renderTotal();
-    });
-    document.getElementById('pay').addEventListener('click', function () {
-      var btn = this; btn.disabled = true; btn.textContent = 'Starting payment…';
-      fetch(api + '&action=create&tip=' + tipCents)
-        .then(function (r) { return r.json(); })
-        .then(function (res) {
-          if (res.ok && res.url) { window.location = res.url; }
-          else { msg('Sorry, we could not start your payment. Please ask your server.'); }
-        })
-        .catch(function () { msg('Sorry, we could not start your payment. Please ask your server.'); });
-    });
   }
-})();
-</script>
-</body>
-</html>
+
+  // ── Bill + tip options ──────────────────────────────────────────────────────
+  const pcts = [
+    Number(s?.adyen_tip_percent_1 ?? 15),
+    Number(s?.adyen_tip_percent_2 ?? 18),
+    Number(s?.adyen_tip_percent_3 ?? 20),
+  ].filter((p) => p > 0);
+
+  const lines = Array.isArray(order.pay_link_items)
+    ? (order.pay_link_items as Array<Record<string, unknown>>).map((i) => ({
+        name: String(i.name ?? "Item"),
+        qty: Number(i.qty ?? 1),
+        amount: Number(i.amount ?? 0),
+      }))
+    : [];
+
+  const sum = (order.pay_link_summary ?? {}) as Record<string, unknown>;
+  const summary = {
+    subtotal: Number(sum.subtotal ?? 0),
+    discount: Number(sum.discount ?? 0),
+    serviceCharge: Number(sum.serviceCharge ?? 0),
+    tax: Number(sum.tax ?? 0),
+    total: Number(sum.total ?? bill),
+  };
+
+  return json({
+    ok: true,
+    orderNumber: order.order_number,
+    amount: Number(bill.toFixed(2)),
+    tips: pcts.map((p) => ({ pct: p, amount: Number((bill * p / 100).toFixed(2)) })),
+    brand: (s?.business_name ?? "") as string,
+    logo: (s?.logo_url ?? "") as string,
+    lines,
+    summary,
+  });
+});
