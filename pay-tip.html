@@ -1,9 +1,23 @@
 <!doctype html>
+<!--
+  Pay by Link tip page.
+
+  Supabase serves HTML as text/plain (anti-abuse), so host this page somewhere
+  that serves real HTML — GitHub Pages is the easy free option:
+    1. Put this file in a PUBLIC repo (it has no secrets).
+    2. Enable GitHub Pages for that repo.
+    3. Set the resulting URL as "Pay by Link page URL" in the POS settings.
+
+  The printed QR points here with the order id and Supabase API base in the URL
+  hash (#order=<id>&api=https://xxx.supabase.co), kept client-side. The page
+  calls the pay-tip Edge Function (JSON, CORS-enabled) for the amount + tip
+  options and to create the payment link.
+-->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Pay your bill</title>
+<title>Pay Your Check</title>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -56,6 +70,7 @@
       text + '</p></div>';
   }
 
+  // Order id + Supabase API base come from the URL hash (kept client-side).
   var params = new URLSearchParams((location.hash || '').replace(/^#/, ''));
   var orderId = params.get('order');
   var apiBase = params.get('api');
@@ -85,6 +100,7 @@
         t.pct + '%<small>' + money(t.amount) + '</small></div>';
     }).join('');
 
+    // Branded header: logo and/or restaurant name, falling back to a title.
     var brandHtml = '';
     if (d.brand || d.logo) {
       brandHtml = '<div class="brand">' +
@@ -93,15 +109,30 @@
         '</div>';
     }
 
+    // Collapsible check details: line items + a subtotal/tax breakdown.
     var linesHtml = '';
-    if (d.lines && d.lines.length) {
-      var rows = d.lines.map(function (l) {
+    if ((d.lines && d.lines.length) || d.summary) {
+      var rows = (d.lines || []).map(function (l) {
         return '<div class="line"><span><span class="q">' + l.qty + '× </span>' +
           esc(l.name) + '</span><span>' + money(l.amount) + '</span></div>';
       }).join('');
+
+      var sm = d.summary || {};
+      var breakdown = '';
+      function sub(label, val, neg) {
+        breakdown += '<div class="line"><span class="q">' + label + '</span><span>' +
+          (neg ? '-' : '') + money(val) + '</span></div>';
+      }
+      if (sm.subtotal) sub('Subtotal', sm.subtotal, false);
+      if (sm.discount) sub('Discount', sm.discount, true);
+      if (sm.serviceCharge) sub('Service charge', sm.serviceCharge, false);
+      if (sm.tax) sub('Sales tax', sm.tax, false);
+
       linesHtml =
         '<button class="link" id="toggleLines">View check details ▾</button>' +
         '<div class="lines" id="linesBox">' + rows +
+          (breakdown ? '<div style="border-top:1px solid #eee;margin-top:6px;padding-top:6px">' +
+            breakdown + '</div>' : '') +
           '<div class="line-total"><span>Total due</span><span>' + money(bill) +
           '</span></div>' +
         '</div>';
