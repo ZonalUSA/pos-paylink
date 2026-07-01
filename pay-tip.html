@@ -49,10 +49,6 @@
   .custom.show { display:block; }
   .custom input { width:100%; font-size:18px; padding:12px; border:1.5px solid #d9dce1;
                   border-radius:12px; }
-  .email { margin-top:16px; }
-  .email label { display:block; font-size:13px; color:#666; margin-bottom:6px; }
-  .email input { width:100%; font-size:16px; padding:12px; border:1.5px solid #d9dce1;
-                 border-radius:12px; }
   .total { display:flex; justify-content:space-between; margin-top:18px; font-size:18px;
            font-weight:700; }
   button.pay { width:100%; margin-top:18px; padding:16px; font-size:17px; font-weight:700;
@@ -159,10 +155,6 @@
           '<input id="customAmt" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Tip amount ($)">' +
         '</div>' +
         '<div class="total"><span>Total</span><span id="total">' + money(bill) + '</span></div>' +
-        '<div class="email">' +
-          '<label for="emailAmt">Email me a receipt (optional)</label>' +
-          '<input id="emailAmt" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com">' +
-        '</div>' +
         '<button class="pay" id="pay">Continue to payment</button>' +
       '</div>';
 
@@ -204,10 +196,7 @@
     });
     document.getElementById('pay').addEventListener('click', function () {
       var btn = this; btn.disabled = true; btn.textContent = 'Starting payment…';
-      var email = (document.getElementById('emailAmt').value || '').trim();
-      var q = api + '&action=create&tip=' + tipCents +
-        (email ? '&email=' + encodeURIComponent(email) : '');
-      fetch(q)
+      fetch(api + '&action=create&tip=' + tipCents)
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (res.ok && res.url) { window.location = res.url; }
